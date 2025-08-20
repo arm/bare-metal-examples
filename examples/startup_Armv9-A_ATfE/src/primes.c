@@ -1,0 +1,150 @@
+/*
+ * SPDX-FileCopyrightText: Copyright 2011-2025 Arm Limited and/or its affiliates <open-source-office@arm.com>
+ * SPDX-License-Identifier: MIT
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy of this software
+ * and associated documentation files (the "Software"), to deal in the Software without
+ * restriction, including without limitation the rights to use, copy, modify, merge, publish,
+ * distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all copies or
+ * substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING
+ * BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+ * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+ * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ */
+
+
+// ------------------------------------------------------------
+// Prime Number Generator Code
+// ------------------------------------------------------------
+
+#include <stdio.h>
+
+#include "primes.h"
+
+#define TARGET_COUNT (100) // Number of primes to find
+
+// ------------------------------------------------------------
+
+static unsigned int prime_numbers[TARGET_COUNT];
+static unsigned int next_number;
+static unsigned int prime_count;
+
+// Mutex to regulate access by multiple CPUs to a resource, aligned to cache line size
+mutex print_lock __attribute__ ((aligned (64)));
+
+// ------------------------------------------------------------
+
+static unsigned int getNextNumber(void)
+{
+  return __atomic_fetch_add(&next_number, 2, __ATOMIC_RELAXED);
+}
+
+// ------------------------------------------------------------
+
+static void addPrime(unsigned int number, unsigned int id)
+{
+
+  unsigned int current_prime_count = __atomic_fetch_add(&prime_count, 1, __ATOMIC_RELAXED);
+
+  // It is possible a CPU could skid past the target number of primes
+  // so check to avoid potential writes past the end of the array
+  if (current_prime_count < TARGET_COUNT)
+  {
+    prime_numbers[current_prime_count] = number;
+    _mutex_acquire(&print_lock);
+    printf("CPU %d: %d (prime %d of %d)\n", id, number, current_prime_count+1,TARGET_COUNT);
+    _mutex_release(&print_lock);
+  }
+
+  return;
+}
+
+// ------------------------------------------------------------
+
+void initPrimes(void)
+{
+    _mutex_initialize(&print_lock);
+
+  // Give it the first few primes because there is no guarantee
+  // from here on the primes will be stored in order.
+  // The algorithm uses all the primes up to the square root of the number being tested,
+  // This guarantees we will have no problem finding primes up to 841
+  prime_numbers[0] = 2;
+  prime_numbers[1] = 3;
+  prime_numbers[2] = 5;
+  prime_numbers[3] = 7;
+  prime_numbers[4] = 11;
+  prime_numbers[5] = 13;
+  prime_numbers[6] = 17;
+  prime_numbers[7] = 19;
+  prime_numbers[8] = 23;
+  prime_numbers[9] = 29;
+  next_number = 31;
+  prime_count = 10;
+
+  return;
+}
+
+// ------------------------------------------------------------
+
+void calculatePrimes(unsigned int id)
+{
+  int number;
+  int square;
+  int remainder;
+  int root = 1;
+  int prime;
+  int i;
+  unsigned int local_prime_count;
+
+  for(local_prime_count = __atomic_load_n(&prime_count, __ATOMIC_RELAXED);
+      local_prime_count < TARGET_COUNT;
+      local_prime_count = __atomic_load_n(&prime_count, __ATOMIC_RELAXED))
+  {
+    // Get the next number
+    number = getNextNumber();
+
+    square = root * root;
+
+    while(number > square)
+    {
+      root++;
+      square = root * root;
+    }
+
+    for(i=1; i < local_prime_count; i++)
+    {
+      prime = prime_numbers[i];
+
+      if (prime > root)
+      {
+        addPrime(number, id);
+        break;
+      }
+
+      remainder = number % prime;
+
+      if (remainder == 0)
+      {
+        // not a prime, so discard number
+        break;
+      }
+    }
+
+    // Not holding any locks
+    // Delay to give other cores a chance, because semihosting is quite slow
+
+    for( i=0; i <= 100000; i++) { __asm volatile ("nop"); }
+  }
+  return;
+}
+
+// ------------------------------------------------------------
+// End of primes.c
+// ------------------------------------------------------------
